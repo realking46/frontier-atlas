@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FrontierAtlas Pipeline Architecture</title>
+<style>
+  @page { size: A4; margin: 13mm 14mm 13mm 14mm; }
+  :root { --ink: #1b2430; --muted: #5b6676; --line: #d5dbe3; --accent: #1f5fae; --soft: #f3f6fa; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: var(--ink); background: #fff;
+         font-size: 9.1pt; line-height: 1.36; margin: 0; }
+  h1 { font-size: 16pt; margin: 0 0 1mm; letter-spacing: -0.2px; }
+  .sub { color: var(--muted); margin: 0 0 3mm; font-size: 9pt; }
+  h2 { font-size: 11pt; color: var(--accent); margin: 3.2mm 0 1.2mm; padding-bottom: 0.6mm;
+       border-bottom: 1px solid var(--line); break-after: avoid; }
+  h3 { font-size: 9.4pt; margin: 2mm 0 0.6mm; break-after: avoid; }
+  p { margin: 0 0 1.4mm; }
+  ul { margin: 0 0 1.4mm; padding-left: 4.5mm; }
+  li { margin: 0 0 0.5mm; }
+  table { border-collapse: collapse; width: 100%; margin: 0.8mm 0 1.8mm; font-size: 8.4pt; break-inside: avoid; }
+  th, td { border: 1px solid var(--line); padding: 0.9mm 1.5mm; text-align: left; vertical-align: top; }
+  th { background: var(--soft); font-weight: 600; }
+  code { font-family: Consolas, "Courier New", monospace; font-size: 8.2pt; background: var(--soft); padding: 0 0.6mm; border-radius: 2px; }
+  pre { font-family: Consolas, "Courier New", monospace; font-size: 7.6pt; line-height: 1.25; background: var(--soft);
+        border: 1px solid var(--line); border-radius: 3px; padding: 1.6mm 2mm; margin: 0.8mm 0 1.8mm; white-space: pre; break-inside: avoid; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; }
+  .note { color: var(--muted); font-size: 8.3pt; }
+  b { font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>FrontierAtlas ingestion pipeline: architecture</h1>
+<p class="sub">Async Python 3.12 &middot; httpx &middot; pydantic &middot; SQLite trial store (Postgres/Redis in production) &middot; Playwright browser tier &middot; 249 offline tests</p>
+
+<pre>
+ frontier (sitemaps, indexes, APIs, feeds) ──► work queue ──► workers (asyncio, N per process, M processes)
+                                                                  │
+   HttpFetcher: per-host semaphore + min interval, 429/5xx backoff with full jitter, Retry-After / rate-limit headers
+      └─ ProtectedFetcher: robots.txt ▸ HTTP ▸ Chromium (JS challenge / JS-only page) ▸ STOP at CAPTCHA, circuit breaker
+                                                                  │
+   parse structured data first (JSON API, JSON-LD, embedded page JSON, RSS)
+      └─ LLM orchestrator only when nothing structured: Gemini Flash → Groq Llama 3.3 → DeepSeek; grounding gate
+                                                                  │
+   freshness gate (news/jobs): date parser ▸ 3-valued verdict ▸ SeenStore claim (lease) ▸ SimHash near-dup
+                                                                  │
+   RecordStore keyed upsert (JSON body + natural key) ──► entity resolution (seed list + dynamic) ──► CSV / Sheets
+</pre>
+
+<h2>1. Scale strategy: 500,000 startups, products and papers without manual intervention</h2>
+<p><b>Structured first, LLM last.</b> The cost of a record is dominated by how it is extracted. All three bulk verticals in the
+trial are collected from machine channels, with no LLM call: YC company pages embed the full company object as JSON;
+Futurepedia publishes <code>sitemap_tools.xml</code> and a JSON payload per tool; OpenRouter and the Hugging Face, arXiv
+and GitHub APIs are JSON. At 500k this matters twice: an LLM call costs ~1,000&times; an HTTP fetch, and structured parsing
+cannot hallucinate. The LLM chain is the fallback for long-tail pages (vendor "about" pages, job posts without JSON-LD).</p>
+
+<p><b>Frontier, then fetch.</b> Each source is a <code>BulkSource(discover, fetch, key_of)</code>: <i>discover</i> is cheap
+(one sitemap or index call yields thousands of URLs), <i>fetch</i> turns one item into records. The engine
+(<code>pipeline/bulk.py</code>) runs a bounded worker pool, writes in batches, and is <b>resumable</b>: items whose key is
+already stored are skipped, so a crash or a deploy costs nothing. One bad page never kills a run; failures are counted by
+reason. Measured on one laptop process: 2,233 YC pages in 447 s (0 failures, polite 5 req/s); 2,431 Futurepedia pages
+<i>plus</i> ~2,400 vendor homepages for maker lookup in 787 s; 1,138 papers with live stars via GitHub GraphQL (100 repos per call).</p>
+
+<p><b>Scaling out without code changes.</b> Throughput is bounded per <i>host</i> (politeness), not per machine, so scale
+comes from many sources in parallel and more workers, never from hitting one site harder:</p>
+<ul>
+  <li><b>Queue:</b> the in-process frontier becomes a shared queue (Redis Streams / SQS) with visibility timeouts. Workers are
+  stateless containers. The keyed upsert makes duplicate delivery harmless (at-least-once delivery, exactly-once records).</li>
+  <li><b>Shared per-host state:</b> politeness intervals, rate-limit pauses, anti-bot tier and circuit state move from process
+  memory to Redis keyed by host, so 50 workers behave like one polite client per site.</li>
+  <li><b>Separate pools by cost:</b> HTTP workers (cheap, high concurrency), browser workers (~50&times; cost, fed only URLs
+  whose host is on the browser tier), LLM workers (bounded by provider token budgets). Each autoscales on its own queue depth.</li>
+  <li><b>Raw capture:</b> fetched HTML is written to object storage (S3) keyed by URL and date, so schema changes or a better
+  extractor re-run over stored pages, not over the web.</li>
+  <li><b>Arithmetic:</b> 500k records &divide; 30 sources &asymp; 17k pages per source. At a polite ~3 req/s per host that is
+  ~90 req/s overall (~5.4k pages/min): 500k pages in about 1.5 h with sources in parallel. Fetching is I/O-bound, so a handful
+  of async processes is enough; the browser and LLM pools are what grow with the share of long-tail pages.</li>
+</ul>
+
+<h2>2. Handling 413s and 429s across thousands of concurrent extractions</h2>
+<div class="two">
+<div>
+<h3>413 / context overflow: never send what will not fit</h3>
+<ul>
+  <li><b>Budget per provider</b> (Gemini 30k, Groq 6k, DeepSeek 24k input tokens; configurable), counted with tiktoken
+  &times;1.1 safety margin, plus a hard <b>byte cap</b> (200 kB), because some gateways reject on bytes before tokens are counted.</li>
+  <li><b>Chunker ("head + densest blocks"):</b> strip boilerplate; lift metadata to the top (title, meta, JSON-LD,
+  <code>&lt;time&gt;</code>); if over budget keep the head (~30%), score the remaining blocks for density (schema keywords,
+  numbers, dates, proper nouns; menus and link farms penalised), take the best greedily, restore original order.</li>
+  <li><b>If a 413 still happens</b> (a provider's real limit is lower than documented): shrink the budget &times;0.55 and retry
+  the <i>same</i> provider, up to 3 times, then fall through to the next provider.</li>
+</ul>
+</div>
+<div>
+<h3>429: rarely hit one, recover cleanly when it happens</h3>
+<ul>
+  <li><b>Client-side token buckets</b> per provider: requests/min <i>and</i> tokens/min. A call reserves (1 request, N tokens)
+  before sending, so the fleet stays under quota instead of discovering it.</li>
+  <li><b>On 429:</b> pause that provider's limiter for everyone, exponential backoff with full jitter, honouring
+  <code>Retry-After</code> and Gemini's <code>retryDelay</code>. After 2 tries the provider enters a 90 s cooldown and the
+  request <b>falls through</b> the chain.</li>
+  <li><b>Other errors:</b> 5xx and timeouts retry with backoff; 401/403/404 disable the provider; invalid JSON, schema or
+  ungrounded identity get one repair call, then fall through.</li>
+</ul>
+</div>
+</div>
+<p><b>At thousands of concurrent extractions</b> the same interfaces become distributed: buckets move to Redis (GCRA /
+<code>redis-cell</code>, one atomic call per reservation) so all nodes draw from one budget per API key; the extraction
+queue gives backpressure (workers only pull when a bucket can pay); keys are sharded across accounts where terms allow;
+priority lanes keep a fresh-news extraction from waiting behind a bulk backfill. The <b>grounding gate</b> runs on every
+result: grounded fields must appear in the source text (fuzzy match &ge; 85), otherwise they are nulled, and an
+ungrounded identity field rejects the record. A dropped record is preferable to an invented one.</p>
+
+<h2>3. Freshness tracking: never processing the same article or job twice across nodes</h2>
+<p><b>Proving "&lt; 24 h".</b> Dates are read from the strongest available evidence, in rank order: JSON-LD
+<code>datePublished</code>/<code>datePosted</code> (0.95), meta tags (0.9), <code>&lt;time&gt;</code> (0.8), URL date (0.6), byline
+(0.55), <code>Last-Modified</code> (0.3). Modified/updated dates are never used. Relative dates ("2 hours ago", "3d") are resolved
+against fetch time, and every date keeps its <b>precision</b> ("yesterday" is a 24 h interval, not an instant). The verdict is
+three-valued: FRESH and STALE require proof; UNCERTAIN items are not ingested. Undated items use two heuristics:
+<b>listing bracketing</b> (an undated item above a fresh dated item in a verified reverse-chronological list is fresh) and
+<b>new since last run</b> (a URL never observed before, above the first known URL, appeared after the previous run, which ran
+within the window). Cold start or a gap longer than the window means UNCERTAIN.</p>
+<table>
+  <tr><th style="width:22%">Layer</th><th>Mechanism (<code>freshness/seen_store.py</code>)</th><th style="width:33%">Production mapping</th></tr>
+  <tr><td>1. Canonical URL key</td><td>Strip tracking params, fragments, AMP, <code>www.</code>, trailing slash; sort params; hash. A newsletter link and the homepage link give one key.</td><td>same function, in every worker</td></tr>
+  <tr><td>2. Atomic claim with lease</td><td>Before fetching, <code>claim(key, node)</code>; exactly one caller wins. A lease expires if a node dies mid-item, so another node can take it; <code>mark_done</code> makes it final.</td><td>Redis <code>SET key node NX EX ttl</code>, or Postgres <code>INSERT&hellip;ON CONFLICT DO UPDATE WHERE lease_until &lt; now()</code></td></tr>
+  <tr><td>3. Content near-duplicates</td><td>64-bit SimHash in 4&times;16-bit bands: any pair within Hamming 3 shares a band, so a lookup touches candidates, not the corpus. Jobs also require a matching title (&ge; 92), so templated descriptions are not merged.</td><td>band index table in Postgres / Redis sets</td></tr>
+  <tr><td>4. Deterministic winner</td><td>Pages download concurrently, but duplicate claims are made in listing order, so reruns keep the same copy.</td><td>per-batch ordering in the worker</td></tr>
+</table>
+<p>Incremental cost is small: paging stops at the first page with no live item (listings are newest-first), so an hourly run
+of an 800-jobs/day board costs 1&ndash;2 requests. A rerun re-fetched nothing and stored nothing, as verified on live data.</p>
+
+<h2>4. Storage strategy</h2>
+<table>
+  <tr><th style="width:17%">Store</th><th>Role and justification</th></tr>
+  <tr><td><b>PostgreSQL</b> (primary)</td><td>System of record. One table per entity type with typed columns for what is queried
+  (name, domain, dates, stars) plus a <code>JSONB</code> body for the full record, a unique natural key for idempotent
+  <code>INSERT&hellip;ON CONFLICT DO UPDATE</code>, and time partitioning for news/jobs. It gives transactions for the
+  claim/lease protocol, mature tooling, and comfortably holds 500k&ndash;50M rows on one primary with read replicas. The trial's
+  SQLite <code>RecordStore</code> has the same interface (keyed upsert, JSON body), so the swap does not change callers.</td></tr>
+  <tr><td><b>pgvector</b> (in Postgres)</td><td>Embeddings of descriptions, abstracts and job texts for semantic search, "similar
+  startups", and candidate generation in entity resolution. At this scale an HNSW index inside Postgres avoids running a
+  second database and keeps vectors joinable with records. A dedicated vector DB is warranted only well beyond ~10M vectors or
+  for heavy filtered-ANN workloads.</td></tr>
+  <tr><td><b>Graph layer</b></td><td>Relationships (startup&ndash;product, startup&ndash;founder, paper&ndash;repo&ndash;org,
+  job&ndash;company, news&ndash;mentions) are first stored as typed edge tables in Postgres, keyed by canonical entity id, and
+  queried with joins and recursive CTEs, which covers 1&ndash;2-hop questions. When multi-hop traversal and graph algorithms
+  (investor networks, talent flow, influence) become core, the same edges are streamed (CDC) into Neo4j or Memgraph as a read
+  model; Postgres remains the source of truth.</td></tr>
+  <tr><td><b>Redis</b></td><td>Coordination, not data: work queues, leases, distributed token buckets, per-host politeness and
+  circuit-breaker state.</td></tr>
+  <tr><td><b>Object storage</b></td><td>Raw HTML/JSON snapshots (compressed, keyed by URL and fetch date), for audit (every
+  value traces to a captured page), re-extraction, and evaluation sets.</td></tr>
+</table>
+
+<h2>5. Entity resolution and protected sources (summary)</h2>
+<p><b>Entity resolution</b> is deterministic and evidence-ranked: website domain &gt; exact name &gt; legal-suffix-stripped
+("OpenAI, Inc.") &gt; spacing and punctuation ignored ("Open AI") &gt; scraping noise removed &gt; generic words removed (distinctive keys
+only) &gt; guarded fuzzy match (ratio &ge; 92, same first letter, 4-point margin). Names that match no seed become new
+canonical entities, clustered with typo merging. Merging is blocked when two names each come with their own, different website (YC lists both
+"Caire Health" and "Cair Health") or differ only in digits. A startup's own website is identity evidence: YC's "Cohere"
+(cohere.io) is not the seed Cohere (cohere.com). Batch resolution is order-independent (tested by shuffling); every mapping
+is logged with method, score and an example source URL.</p>
+<p><b>Protected sources</b> are handled by classification, not evasion. Responses are classified (Cloudflare challenge or block,
+DataDome, AWS WAF CAPTCHA, empty JavaScript-only page). JavaScript-only pages and non-interactive challenges are rendered in real Chromium (sticky per
+host). CAPTCHAs and hard blocks are never solved: the host's circuit opens (probe-first, so a wall is hit once) and the
+pipeline uses the site's machine channel instead, e.g. Ars Technica's RSS feed, with items labelled
+<code>text_source=feed-lead</code>. robots.txt and <code>Crawl-delay</code> are honoured, and the crawler identifies itself
+honestly. For sources whose terms forbid automation (Crunchbase, G2, Glassdoor) the production path is their licensed API.</p>
+
+<h2>6. Fault tolerance and operations</h2>
+<table>
+  <tr><th style="width:26%">Failure</th><th>Behaviour</th></tr>
+  <tr><td>Worker crash mid-run</td><td>Keyed upserts plus resume-by-key: the rerun skips stored items. Unfinished freshness claims expire with their lease and are re-claimed by another node.</td></tr>
+  <tr><td>One bad page / parser error</td><td>Isolated per item, counted by reason in the run summary; the crawl continues.</td></tr>
+  <tr><td>Source down or feed failing</td><td>Retries with backoff; a failed run is not recorded as the baseline for "new since last run", so no items are wrongly judged on the next run.</td></tr>
+  <tr><td>Provider outage / quota exhausted</td><td>Provider cooldown, fall through the LLM chain; if all fail, the item is recorded as not extractable and never stored half-extracted (a production queue would re-deliver it later).</td></tr>
+  <tr><td>Site starts blocking</td><td>Block classified, host slowed, circuit opens with doubling cool-down; the blocked-host rate is a metric to alert on.</td></tr>
+  <tr><td>Bad or ambiguous data</td><td>Grounding gate, three-valued freshness, evidence-backed maker names, website-based entity identity: the pipeline prefers an empty field or a dropped record to a guess, and every value keeps its source URL.</td></tr>
+</table>
+<p><b>Observability.</b> Structured JSON logs (structlog) with per-source, per-host and per-provider counters (fetched, stored,
+stale, uncertain, near-duplicate, blocked by kind, retries by status, provider fall-throughs). Every run ends with a
+machine-readable summary, which is the basis for dashboards and alerts in production. 249 offline tests cover the
+orchestrator (fallback, 413 shrink, 429 cooldown, repair), chunker, date parser, freshness heuristics, deduplication
+races, entity resolution and the anti-bot tiers, with mocked network and fake LLM providers.</p>
+
+</body>
+</html>
