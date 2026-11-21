@@ -37,7 +37,11 @@ python -m venv .venv
 ```bash
 .venv/Scripts/python -m pip install -r requirements.txt
 ```
-(On Linux/macOS use `.venv/bin/python`.) The browser tier is optional; to enable it:
+```bash
+.venv/Scripts/python -m pip install -e .
+```
+The second step installs the `frontier-atlas` command into the venv.
+(On Linux/macOS use `.venv/bin/...` instead of `.venv/Scripts/...`; the commands are the same in PowerShell, cmd and bash.) The browser tier is optional; to enable it:
 ```bash
 .venv/Scripts/python -m playwright install chromium
 ```
@@ -54,19 +58,19 @@ provider, retry budgets, freshness window, politeness intervals, circuit-breaker
 
 ## Running
 
-All commands are subcommands of one CLI. Run them from the repo root with `PYTHONPATH=src`:
+All commands are subcommands of one CLI. Run them from the repo root (paths such as `data/` and `.env` are relative to it):
 
 ```bash
-PYTHONPATH=src .venv/Scripts/python -m frontier_atlas.cli startups
+.venv/Scripts/frontier-atlas startups
 ```
 ```bash
-PYTHONPATH=src .venv/Scripts/python -m frontier_atlas.cli products
+.venv/Scripts/frontier-atlas products
 ```
 ```bash
-PYTHONPATH=src .venv/Scripts/python -m frontier_atlas.cli papers --target 1000
+.venv/Scripts/frontier-atlas papers --target 1000
 ```
 ```bash
-PYTHONPATH=src .venv/Scripts/python -m frontier_atlas.cli signals
+.venv/Scripts/frontier-atlas signals
 ```
 
 | Command | What it does |
@@ -96,7 +100,7 @@ headers are frozen with filters, text over the cell limit is cut with a pointer 
 
 **Option A: import the workbook (no credentials).**
 ```bash
-PYTHONPATH=src .venv/Scripts/python -m frontier_atlas.cli export
+.venv/Scripts/frontier-atlas export
 ```
 In Google Sheets: File → Import → Upload `data/output/frontier_atlas.xlsx` → "Replace
 spreadsheet". Then Share → General access → "Anyone with the link" → Viewer.
@@ -109,7 +113,7 @@ spreadsheet". Then Share → General access → "Anyone with the link" → Viewe
 3. Set `FA_GOOGLE_SHEET_ID` (the id in the sheet's URL) and `FA_GOOGLE_SERVICE_ACCOUNT_FILE` in
    `.env`, then:
 ```bash
-PYTHONPATH=src .venv/Scripts/python -m frontier_atlas.cli export --push
+.venv/Scripts/frontier-atlas export --push
 ```
 The push creates missing tabs and clears and rewrites only these six. It removes the new
 sheet's default "Sheet1" only if that tab is empty, and leaves any other tab alone. Writes are

@@ -23,6 +23,9 @@ dependencies = [
     "python-dotenv>=1.0",
 ]
 
+[project.scripts]
+frontier-atlas = "frontier_atlas.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 # browser tier for JS-rendered / challenge pages (then: python -m playwright install chromium)
