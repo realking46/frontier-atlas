@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+logs/*
+!logs/.gitkeep
+data/raw/*
+data/output/*
+!data/raw/.gitkeep
+!data/output/.gitkeep
+*.egg-info/
+# credentials: never commit service-account keys
+secrets/
+*service-account*.json
+*-credentials.json
+# generated crawl state (record store, freshness/seen store)
+data/*.sqlite3
+data/*.sqlite3-*
+# local tooling
+.claude/
+.idea/
+.vscode/

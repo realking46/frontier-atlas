@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frontier-atlas"
+version = "0.1.0"
+description = "Fault-tolerant ingestion pipeline for the AI / venture intelligence graph"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "structlog>=24.1",
+    "selectolax>=1.0",
+    "tiktoken>=0.7",
+    "rapidfuzz>=3.9",
+    "trafilatura>=2.0",
+    "openpyxl>=3.1",
+    "google-auth>=2.30",
+    "requests>=2.31",
+    "python-dateutil>=2.9",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+# browser tier for JS-rendered / challenge pages (then: python -m playwright install chromium)
+browser = ["playwright>=1.48"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"frontier_atlas.extraction.prompts" = ["*.txt"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
