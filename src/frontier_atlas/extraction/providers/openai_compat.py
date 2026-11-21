@@ -7,21 +7,25 @@ from .base import LLMProvider, LLMResponse
 
 class OpenAICompatProvider(LLMProvider):
     base_url: str = ""
+    reasoning_effort: str | None = None   # reasoning models (Groq gpt-oss): reasoning counts against max_tokens
 
     async def complete(self, system: str, user: str) -> LLMResponse:
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "max_tokens": 1500,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         data = await self._post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
-            payload={
-                "model": self.model,
-                "temperature": 0,
-                "max_tokens": 1500,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            },
+            payload=payload,
         )
         try:
             text = data["choices"][0]["message"]["content"] or ""

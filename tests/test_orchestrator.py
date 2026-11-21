@@ -47,6 +47,19 @@ async def test_429_backs_off_then_falls_through(settings, sleeps):
     assert len(a.prompts) == 3
 
 
+async def test_429_with_quota_sized_retry_after_falls_through_without_sleeping(settings, sleeps):
+    # live run: Gemini's free-tier daily cap answered retryDelay=33140s (9 h)
+    a = FakeProvider("a", [RateLimitError("429", retry_after=33140.0)])
+    b = FakeProvider("b", [GOOD, GOOD])
+    orch = LLMOrchestrator([a, b], settings, sleep=sleeps)
+    res = await orch.extract(PAGE, StartupExtraction)
+    assert res.provider == "b" and sleeps.calls == []          # no 9-hour sleep
+    assert [x.outcome for x in res.attempts] == ["quota", "ok"]
+    res2 = await orch.extract(PAGE, StartupExtraction)        # a stays cooled down for the quota window
+    assert res2.attempts[0].outcome == "cooldown" and int(res2.attempts[0].detail[:-6]) > 30000
+    assert len(a.prompts) == 1
+
+
 async def test_429_recovers_on_same_provider(settings, sleeps):
     a = FakeProvider("a", [RateLimitError("429"), GOOD])
     orch = LLMOrchestrator([a], settings, sleep=sleeps)
@@ -135,3 +148,16 @@ def test_parse_json_object_variants():
     assert parse_json_object('blah {"a": 1} blah') == {"a": 1}
     assert parse_json_object('[{"a": 1}]') == {"a": 1}
     assert parse_json_object("nope") is None
+
+
+def test_grounding_accepts_the_pages_own_site_but_not_other_urls():
+    from frontier_atlas.extraction import grounding
+    from frontier_atlas.schemas import StartupExtraction
+
+    text = "Chroma. Open-source search infrastructure for AI. Get started."
+    d = StartupExtraction(entityName="Chroma", website="https://trychroma.com")
+    assert grounding.check(d, text, kind="startup", source_url="https://www.trychroma.com/").dropped == []
+    d = StartupExtraction(entityName="Chroma", website="https://chroma-db.example")      # invented
+    assert grounding.check(d, text, kind="startup", source_url="https://www.trychroma.com/").dropped == ["website"]
+    d = StartupExtraction(entityName="Chroma", website="https://trychroma.com")
+    assert grounding.check(d, text, kind="startup").dropped == ["website"]                 # no URL given: strict

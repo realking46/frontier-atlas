@@ -14,6 +14,7 @@ import httpx
 
 from ...core.errors import (
     FatalProviderError,
+    InvalidOutputError,
     PayloadTooLargeError,
     ProviderError,
     RateLimitError,
@@ -27,6 +28,9 @@ CONTEXT_OVERFLOW_RE = re.compile(
     r"exceeds the maximum|request too large|entity too large|input token count|prompt is too long",
     re.I,
 )
+# provider-side JSON-mode validation failure: the model's output was not valid JSON
+# (seen live from Groq gpt-oss: 400 json_validate_failed). Repairable, not fatal.
+JSON_MODE_FAILED_RE = re.compile(r"json_validate_failed|failed to validate json|failed_generation", re.I)
 GEMINI_RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
 
 
@@ -90,6 +94,8 @@ class LLMProvider(ABC):
             raise RateLimitError(f"429 rate limited: {body[:300]}", retry_after=retry_after, **kw)
         if status == 413 or (status == 400 and CONTEXT_OVERFLOW_RE.search(body)):
             raise PayloadTooLargeError(f"{status} payload too large: {body[:300]}", **kw)
+        if status == 400 and JSON_MODE_FAILED_RE.search(body):
+            raise InvalidOutputError(f"{status} provider rejected its own JSON: {body[:300]}", **kw)
         if status in (401, 403, 404):
             raise FatalProviderError(f"{status}: {body[:300]}", **kw)
         if status >= 500 or status in (408, 409, 425):

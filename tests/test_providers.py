@@ -8,6 +8,7 @@ import pytest
 
 from frontier_atlas.core.errors import (
     FatalProviderError,
+    InvalidOutputError,
     PayloadTooLargeError,
     RateLimitError,
     TransientError,
@@ -28,6 +29,8 @@ def _provider(cls, handler):
         (413, "Request Entity Too Large", {}, PayloadTooLargeError),
         (400, '{"error":{"code":"context_length_exceeded"}}', {}, PayloadTooLargeError),
         (401, "invalid api key", {}, FatalProviderError),
+        # seen live from Groq gpt-oss: JSON mode rejected the model's own (empty) output
+        (400, '{"error":{"code":"json_validate_failed","failed_generation":""}}', {}, InvalidOutputError),
         (503, "overloaded", {}, TransientError),
     ],
 )
@@ -45,11 +48,17 @@ async def test_groq_success_and_request_shape():
     def handler(req: httpx.Request):
         seen["url"] = str(req.url)
         seen["auth"] = req.headers["authorization"]
+        seen["body"] = __import__("json").loads(req.content)
         return httpx.Response(200, json={"choices": [{"message": {"content": '{"a":1}'}}],
                                          "usage": {"prompt_tokens": 10, "completion_tokens": 3}})
 
     r = await _provider(GroqProvider, handler).complete("s", "u")
     assert r.text == '{"a":1}' and r.input_tokens == 10
+    assert "reasoning_effort" not in seen["body"]                   # only sent when configured
+    p = _provider(GroqProvider, handler)
+    p.reasoning_effort = "low"
+    await p.complete("s", "u")
+    assert seen["body"]["reasoning_effort"] == "low"
     assert seen["url"].endswith("/openai/v1/chat/completions")
     assert seen["auth"] == "Bearer k"
 

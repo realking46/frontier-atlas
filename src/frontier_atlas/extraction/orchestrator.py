@@ -5,7 +5,9 @@
                          │  413 ──────┘ shrink budget ×0.55, same provider
                          │
    429 ─► pause provider's limiter, backoff+jitter (honour Retry-After),
-          after N tries put provider in cooldown and FALL THROUGH
+          after N tries put provider in cooldown and FALL THROUGH;
+          Retry-After > llm_max_retry_wait_s (quota exhausted) ─► cooldown for that
+          long and FALL THROUGH at once, never block a worker for hours
    5xx/timeout ─► backoff+jitter, same provider
    bad JSON / schema / hallucinated identity ─► 1 repair call with feedback,
           then FALL THROUGH
@@ -119,9 +121,9 @@ class LLMOrchestrator:
                     log.error("llm.provider_disabled", provider=provider.name, error=str(exc))
                     errors.append((provider.name, exc))
                 except RateLimitError as exc:
-                    self._cooldown_until[provider.name] = time.monotonic() + self.s.llm_provider_cooldown_s
-                    log.warning("llm.provider_cooldown", provider=provider.name,
-                                seconds=self.s.llm_provider_cooldown_s)
+                    cooldown = max(self.s.llm_provider_cooldown_s, exc.retry_after or 0.0)
+                    self._cooldown_until[provider.name] = time.monotonic() + cooldown
+                    log.warning("llm.provider_cooldown", provider=provider.name, seconds=round(cooldown))
                     errors.append((provider.name, exc))
                 except ProviderError as exc:  # 413 exhausted, transient exhausted, invalid output
                     errors.append((provider.name, exc))
@@ -161,7 +163,8 @@ class LLMOrchestrator:
             try:
                 resp = await p.complete(system, user)
                 data = self._parse(resp.text, schema_cls, p.name)
-                report = grounding.check(data, page_text, kind=kind, min_score=self.s.grounding_min_score)
+                report = grounding.check(data, page_text, kind=kind, min_score=self.s.grounding_min_score,
+                                         source_url=source_url)
                 if not report.ok:
                     if grounding.IDENTITY_FIELD.get(kind) not in report.dropped:
                         # model honestly returned null identity: nothing to extract here
@@ -186,6 +189,12 @@ class LLMOrchestrator:
                 attempts.append(Attempt(p.name, "429", chunk.tokens, f"retry_after={exc.retry_after}"))
                 self.stats[f"{p.name}.429"] += 1
                 if rl_retries >= self.s.llm_max_429_retries:
+                    raise
+                if exc.retry_after is not None and exc.retry_after > self.s.llm_max_retry_wait_s:
+                    # quota exhausted (daily / monthly cap): waiting is pointless, fall through now
+                    attempts[-1].outcome = "quota"
+                    self.stats[f"{p.name}.quota"] += 1
+                    log.warning("llm.quota_exhausted", provider=p.name, retry_after_s=round(exc.retry_after))
                     raise
                 delay = backoff_delay(rl_retries, base=self.s.llm_backoff_base_s,
                                       cap=self.s.llm_backoff_cap_s, retry_after=exc.retry_after)

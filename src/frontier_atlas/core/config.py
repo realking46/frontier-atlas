@@ -28,8 +28,14 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = Field(default=None, validation_alias="DEEPSEEK_API_KEY")
 
     # --- LLM models ---
-    gemini_model: str = "gemini-2.5-flash"
-    groq_model: str = "llama-3.3-70b-versatile"
+    gemini_model: str = "gemini-3.5-flash"
+    # Gemini 3.x "thinks" before answering by default (60 s+ per call measured on 3.8-flash);
+    # extraction needs none. "minimal" -> ~7 s on 3.5-flash. Empty = model default.
+    gemini_thinking_level: str | None = "minimal"
+    # Groq's gpt-oss is a reasoning model; its reasoning tokens count against max_tokens, and on
+    # dense pages "medium" can use the whole budget and return nothing. Empty = provider default.
+    groq_reasoning_effort: str | None = "low"
+    groq_model: str = "openai/gpt-oss-120b"
     deepseek_model: str = "deepseek-chat"
 
     # Order of the fallback chain, comma separated provider names.
@@ -40,7 +46,7 @@ class Settings(BaseSettings):
     gemini_tpm: int = 1_000_000
     gemini_max_input_tokens: int = 30_000
     groq_rpm: int = 30
-    groq_tpm: int = 12_000
+    groq_tpm: int = 8_000      # measured: x-ratelimit-limit-tokens for openai/gpt-oss-120b (free tier)
     groq_max_input_tokens: int = 6_000
     deepseek_rpm: int = 60
     deepseek_tpm: int = 500_000
@@ -58,6 +64,10 @@ class Settings(BaseSettings):
     llm_shrink_factor: float = 0.55   # budget multiplier after each 413
     llm_backoff_base_s: float = 1.0
     llm_backoff_cap_s: float = 60.0
+    # A 429 asking us to wait longer than this is a quota exhaustion (e.g. a free tier's daily
+    # cap: Gemini answered retryDelay=33140s in the live run). Don't sleep: cool the provider
+    # down for the requested time and fall through at once.
+    llm_max_retry_wait_s: float = 60.0
     llm_provider_cooldown_s: float = 90.0  # how long a provider is skipped after exhausting 429 retries
 
     # --- crawling ---

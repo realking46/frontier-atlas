@@ -41,16 +41,21 @@ def normalize(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _str_in_source(value: str, norm_source: str, min_score: int) -> bool:
+def _host(url: str) -> str:
+    return urlparse(url if "://" in url else f"https://{url}").netloc.lower().removeprefix("www.")
+
+
+def _str_in_source(value: str, norm_source: str, min_score: int, source_host: str = "") -> bool:
     v = normalize(value)
     if not v:
         return True
     if v in norm_source:
         return True
     if value.startswith(("http://", "https://")) or "." in v and " " not in v:
-        host = urlparse(value if "://" in value else f"https://{value}").netloc.lower()
-        host = host.removeprefix("www.")
-        return bool(host) and host in norm_source
+        host = _host(value)
+        # a URL is grounded if the page shows it, or if it IS the page's own site
+        # (link targets are stripped from page text, but the page address is evidence)
+        return bool(host) and (host in norm_source or host == source_host)
     if len(v) < 4:  # short tokens: fuzzy matching is meaningless, require exact
         return False
     return fuzz.partial_ratio(v, norm_source) >= min_score
@@ -69,9 +74,11 @@ def check(
     *,
     kind: str,
     min_score: int = 85,
+    source_url: str | None = None,
 ) -> GroundingReport:
     """Mutates `extraction` in place: ungrounded grounded-fields become None."""
     norm_source = normalize(source_text)
+    source_host = _host(source_url) if source_url else ""
     report = GroundingReport(ok=True)
 
     for name in extraction.grounded_fields():
@@ -83,9 +90,9 @@ def check(
         if isinstance(value, int):
             good = _int_in_source(value, norm_source)
         elif isinstance(value, str):
-            good = _str_in_source(value, norm_source, min_score)
+            good = _str_in_source(value, norm_source, min_score, source_host)
         elif isinstance(value, list):
-            kept = [v for v in value if not isinstance(v, str) or _str_in_source(v, norm_source, min_score)]
+            kept = [v for v in value if not isinstance(v, str) or _str_in_source(v, norm_source, min_score, source_host)]
             good = len(kept) == len(value)
             if not good:
                 setattr(extraction, name, kept or None)

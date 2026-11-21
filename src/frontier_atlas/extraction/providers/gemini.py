@@ -7,19 +7,19 @@ from .base import LLMProvider, LLMResponse
 class GeminiProvider(LLMProvider):
     name = "gemini"
     base_url = "https://generativelanguage.googleapis.com/v1beta"
+    thinking_level: str | None = None     # set from settings.gemini_thinking_level
 
     async def complete(self, system: str, user: str) -> LLMResponse:
+        gen = {"temperature": 0, "maxOutputTokens": 1500, "responseMimeType": "application/json"}
+        if self.thinking_level:
+            gen["thinkingConfig"] = {"thinkingLevel": self.thinking_level}
         data = await self._post(
             f"{self.base_url}/models/{self.model}:generateContent",
             headers={"x-goog-api-key": self.api_key},
             payload={
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
-                "generationConfig": {
-                    "temperature": 0,
-                    "maxOutputTokens": 1500,
-                    "responseMimeType": "application/json",
-                },
+                "generationConfig": gen,
             },
         )
         try:

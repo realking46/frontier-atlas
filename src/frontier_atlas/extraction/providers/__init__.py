@@ -29,8 +29,11 @@ def build_chain(settings: Settings, client: httpx.AsyncClient) -> list[LLMProvid
         cls, key, model, max_in, rpm, tpm = specs[name]
         if not key:
             continue
-        chain.append(
-            cls(api_key=key, model=model, max_input_tokens=max_in, rpm=rpm, tpm=tpm,
-                client=client, timeout_s=settings.llm_timeout_s)
-        )
+        provider = cls(api_key=key, model=model, max_input_tokens=max_in, rpm=rpm, tpm=tpm,
+                       client=client, timeout_s=settings.llm_timeout_s)
+        if name == "gemini":
+            provider.thinking_level = settings.gemini_thinking_level or None
+        elif name == "groq":
+            provider.reasoning_effort = settings.groq_reasoning_effort or None
+        chain.append(provider)
     return chain
