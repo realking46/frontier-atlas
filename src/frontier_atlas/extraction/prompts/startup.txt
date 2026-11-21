@@ -1,0 +1,5 @@
+Type-specific instructions (STARTUP):
+- The page describes one company (a directory profile, an "About" page, or a launch page).
+- "entityName" is the company's own name, not the directory's name and not a product name.
+- If the page lists many companies, extract only the main one the page is about.
+- If the page does not describe any company, return all keys as null.

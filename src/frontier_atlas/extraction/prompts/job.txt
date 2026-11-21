@@ -1,0 +1,6 @@
+Type-specific instructions (JOB):
+- Extract the single job posting the page is about.
+- "date_text" must be the posting date exactly as shown (e.g. "Posted 5 hours ago", "2026-11-20"). Do not convert it.
+- is_remote: true if the posting says remote / work from anywhere / remote-friendly; false if it says on-site only; null if not stated.
+- role_family: pick the closest of the allowed categories based on the job title.
+- If the page is not a job posting, return all keys as null.

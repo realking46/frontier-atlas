@@ -1,0 +1,5 @@
+Type-specific instructions (NEWS):
+- Extract the single article the page is about.
+- "date_text" must be the publication date exactly as shown on the page or in its metadata lines (e.g. [published_time]). Do not convert it.
+- "summary" must only restate facts from the article.
+- If the page is not a news article, return all keys as null.

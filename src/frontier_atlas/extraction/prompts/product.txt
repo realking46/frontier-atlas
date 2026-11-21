@@ -1,0 +1,5 @@
+Type-specific instructions (PRODUCT):
+- "productName" is the product/tool name; "startupName" is the company that makes it (often after "by" or "made by").
+- pricingModel: FREE = entirely free; FREEMIUM = free tier plus paid plans; PAID = paid only (trials still count as PAID);
+  ENTERPRISE = only "contact sales"/custom pricing. Use null if pricing is not mentioned at all.
+- If the page does not describe a product, return all keys as null.
