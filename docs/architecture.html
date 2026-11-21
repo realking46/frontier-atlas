@@ -31,7 +31,7 @@
 <body>
 
 <h1>FrontierAtlas ingestion pipeline: architecture</h1>
-<p class="sub">Async Python 3.12 &middot; httpx &middot; pydantic &middot; SQLite trial store (Postgres/Redis in production) &middot; Playwright browser tier &middot; 249 offline tests</p>
+<p class="sub">Async Python 3.12 &middot; httpx &middot; pydantic &middot; SQLite trial store (Postgres/Redis in production) &middot; Playwright browser tier &middot; 252 offline tests</p>
 
 <pre>
  frontier (sitemaps, indexes, APIs, feeds) ──► work queue ──► workers (asyncio, N per process, M processes)
@@ -40,7 +40,7 @@
       └─ ProtectedFetcher: robots.txt ▸ HTTP ▸ Chromium (JS challenge / JS-only page) ▸ STOP at CAPTCHA, circuit breaker
                                                                   │
    parse structured data first (JSON API, JSON-LD, embedded page JSON, RSS)
-      └─ LLM orchestrator only when nothing structured: Gemini Flash → Groq Llama 3.3 → DeepSeek; grounding gate
+      └─ LLM orchestrator only when nothing structured: Gemini 3.5 Flash → Groq gpt-oss-120b → DeepSeek; grounding gate
                                                                   │
    freshness gate (news/jobs): date parser ▸ 3-valued verdict ▸ SeenStore claim (lease) ▸ SimHash near-dup
                                                                   │
@@ -98,12 +98,16 @@ comes from many sources in parallel and more workers, never from hitting one sit
   before sending, so the fleet stays under quota instead of discovering it.</li>
   <li><b>On 429:</b> pause that provider's limiter for everyone, exponential backoff with full jitter, honouring
   <code>Retry-After</code> and Gemini's <code>retryDelay</code>. After 2 tries the provider enters a 90 s cooldown and the
-  request <b>falls through</b> the chain.</li>
+  request <b>falls through</b> the chain. A <code>Retry-After</code> longer than 60 s means the quota is used up
+  (seen live: Gemini asked for 9 h), so the provider is cooled down for that long and the request falls through at once.</li>
   <li><b>Other errors:</b> 5xx and timeouts retry with backoff; 401/403/404 disable the provider; invalid JSON, schema or
   ungrounded identity get one repair call, then fall through.</li>
 </ul>
 </div>
 </div>
+<p><b>Validated live</b> against Gemini and Groq (<code>docs/llm_live_run.md</code>): a real 404 fall-through, a real 413
+followed by shrink and retry, real 429 bursts with <code>Retry-After</code>, and quota exhaustion. The live runs also caught
+retired model ids and a provider rate limit lower than documented, both now configured from the APIs' own answers.</p>
 <p><b>At thousands of concurrent extractions</b> the same interfaces become distributed: buckets move to Redis (GCRA /
 <code>redis-cell</code>, one atomic call per reservation) so all nodes draw from one budget per API key; the extraction
 queue gives backpressure (workers only pull when a bucket can pay); keys are sharded across accounts where terms allow;
@@ -180,7 +184,7 @@ honestly. For sources whose terms forbid automation (Crunchbase, G2, Glassdoor) 
 </table>
 <p><b>Observability.</b> Structured JSON logs (structlog) with per-source, per-host and per-provider counters (fetched, stored,
 stale, uncertain, near-duplicate, blocked by kind, retries by status, provider fall-throughs). Every run ends with a
-machine-readable summary, which is the basis for dashboards and alerts in production. 249 offline tests cover the
+machine-readable summary, which is the basis for dashboards and alerts in production. 252 offline tests cover the
 orchestrator (fallback, 413 shrink, 429 cooldown, repair), chunker, date parser, freshness heuristics, deduplication
 races, entity resolution and the anti-bot tiers, with mocked network and fake LLM providers.</p>
 

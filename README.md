@@ -86,7 +86,7 @@ All commands are subcommands of one CLI. Run them from the repo root (paths such
 Every crawl command ends by running entity resolution and re-exporting the CSVs. Run summaries
 (JSON) include per-source counts, HTTP stats, and per-host anti-bot outcomes.
 
-Tests (249, all offline with mocked network and fake LLM providers):
+Tests (252, all offline with mocked network and fake LLM providers):
 ```bash
 .venv/Scripts/python -m pytest -q
 ```
@@ -129,7 +129,7 @@ paced under the API's 60-requests-per-minute quota, with backoff on 429.
         │  └── ProtectedFetcher ── robots.txt ▸ HTTP ▸ Chromium tier ▸ stop at CAPTCHA (circuit breaker)
         ▼
  parsers (structured first) ──► LLM orchestrator only when there is no structured data
-        │                        Gemini Flash → Groq Llama 3.3 → DeepSeek,
+        │                        Gemini 3.5 Flash → Groq gpt-oss-120b → DeepSeek,
         │                        chunker (never 413), token buckets (rarely 429), grounding gate
         ▼
  freshness gate (news/jobs) ── date parser, 3-valued verdict, listing heuristics,
@@ -150,6 +150,33 @@ paced under the API's 60-requests-per-minute quota, with backoff on 429.
 | `storage/`, `export/` | record store, CSV export, Google Sheets (xlsx workbook + Sheets API push) |
 | `schemas/` | pydantic models matching the brief's field names |
 
+## LLM engine: live runs
+
+[`docs/llm_live_run.md`](docs/llm_live_run.md) shows the extraction engine against the real Gemini
+and Groq APIs (reproduce with `.venv/Scripts/python scripts/llm_live_check.py`):
+
+| Scenario | What happened live |
+|---|---|
+| A. Real pages of each type | Startup, product, job and news pages extracted by Gemini 3.5 Flash in 1.5–23 s; facts not on a page came back as null |
+| B. Broken provider | Gemini pointed at a nonexistent model → real 404 → provider disabled → Groq served |
+| C. Oversized page | 54.5k-token paper: chunker sent 4k tokens; with an oversized budget forced, Groq returned a real 413 → payload shrunk → real 429 → waited out `Retry-After` → success |
+| D. Burst | 6 concurrent requests over Groq's 8k tokens/min → 6 real 429s → backoff, cooldown, 2 requests served by Gemini, all 6 completed |
+| E. Daily quota used up | Gemini's 429 asked for a 9-hour wait → no sleep: provider cooled down for that long, request fell through to Groq at once |
+
+The live runs found and fixed problems the offline tests could not:
+- **Retired models:** `gemini-2.5-flash` and Groq's Llama 3.3 no longer exist for new keys. Models
+  were re-chosen from each API's model list: `gemini-3.5-flash` and Groq `openai/gpt-oss-120b`.
+- **Slow thinking:** Gemini 3.x "thinks" by default, taking 60 s or more per call; extraction now
+  requests minimal thinking, which brings it to about 7 s.
+- **Wrong Groq limit:** Groq's real limit for this model is 8,000 tokens/min (read from its
+  rate-limit headers), not 12,000, so the client-side limiter was corrected.
+- **Hours-long sleep:** a quota-sized `Retry-After` used to put a worker to sleep for hours. It
+  now cools the provider down instead (`llm_max_retry_wait_s`).
+- **Groq JSON-mode failure:** a 400 `json_validate_failed` from Groq is now treated as repairable
+  output, and Groq uses low reasoning effort so it doesn't spend its whole output budget thinking.
+- **Website grounding:** a company website equal to the page's own address now counts as
+  grounded. Previously the check dropped Chroma's correct website.
+
 ## No hallucinated data
 
 - **Structured first.** Startups, products, papers, most jobs and all news dates come from APIs,
@@ -169,8 +196,8 @@ paced under the API's 60-requests-per-minute quota, with backoff on 429.
 
 ## Known limitations
 
-- The LLM path is fully tested offline (fallback, 413 shrink, 429 cooldown, repair, grounding)
-  but was not exercised live in these runs: structured sources covered every target.
+- The bulk datasets did not need the LLM (structured sources covered every target); the engine
+  was validated live separately (above). DeepSeek, third in the chain, was not run live (no key).
 - Cloudflare's JavaScript challenge detects headless Chromium. Those sites stay blocked by design
   (no stealth evasion); see `docs/anti_bot.md` for the alternatives used.
 - The Sheets API push is covered by tests against a mocked API but needs your service account
