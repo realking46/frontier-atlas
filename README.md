@@ -1,5 +1,8 @@
 # FrontierAtlas ingestion pipeline
 
+![tests](https://github.com/realking46/frontier-atlas/actions/workflows/tests.yml/badge.svg)
+
+
 An async, fault-tolerant pipeline that collects AI **startups, products, research papers, jobs and
 news**, normalises them into one canonical schema, and resolves company names to canonical
 entities. Built for the GraphOne / FrontierAtlas AI Engineer assessment.
@@ -193,6 +196,30 @@ The live runs found and fixed problems the offline tests could not:
   < 24 h old. Items that are possibly fresh but unproven are dropped and recorded.
 - **Protected pages are labelled.** Ars Technica's article pages are behind a CAPTCHA. Its items
   carry the publisher's feed lead with `text_source=feed-lead`, never presented as full text.
+
+## Testing and CI
+
+**252 tests, all offline, in about 4 seconds, with 79% line coverage.** The tests use recorded
+fixtures and fake providers, so they never call real websites or LLM APIs.
+
+| Area | Examples of what is tested |
+|---|---|
+| Extraction | chunking under token budgets, grounding checks, provider fallback on 404/413/429, `Retry-After` handling |
+| Freshness | date parsing across formats and time zones, the 24-hour gate, seen-store deduplication |
+| Resolution | name normalisation, fuzzy matching to canonical entities |
+| Sources & export | anti-bot tiering, paper and catalog pipelines, CSV/Sheets export |
+
+```bash
+pip install -e ".[dev]"
+pytest -q --cov=frontier_atlas --cov-report=term
+```
+
+- **GitHub Actions** (`.github/workflows/tests.yml`) runs the suite on Python 3.11 and 3.12 for
+  every push and pull request, and uploads JUnit and coverage reports.
+- **Jenkins** (`Jenkinsfile`) runs the same install/test stages, publishes test results and
+  coverage, and has an optional SonarQube stage.
+- **SonarQube / SonarCloud** (`sonar-project.properties`) reads the coverage and test reports.
+  The CI scan runs once a `SONAR_TOKEN` secret is added to the repo.
 
 ## Known limitations
 

@@ -21,3 +21,7 @@ data/*.sqlite3-*
 .claude/
 .idea/
 .vscode/
+# test & coverage output
+.coverage
+coverage.xml
+reports/
